@@ -1,6 +1,3 @@
-cat /dev/urandom
-================
-
 what happens when you `cat /dev/urandom`? random shit comes out and gets dumped
 into this repository.
 
