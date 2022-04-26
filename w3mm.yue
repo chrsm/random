@@ -1,0 +1,43 @@
+#!/usr/bin/env -S yue -e
+--[[
+  handles converting W3MM's installed.xml file to W3's ini format.
+  at some point they got out of sync so i wrote this.
+
+  requires `xml2lua`: luarocks install xml2lua
+
+  ./w3.yue path/to/xml > path/to/ini
+]]
+import "xml2lua" as xml
+import "xmlhandler.tree" as tree
+
+unless arg[1]
+  error "args: no xml path"
+
+fp, err = io.open arg[1], "r"
+if err
+  error "open: #{ err }"
+
+with xml.parser tree
+  fp\read "*a"
+    |> \parse
+  fp\close!
+
+ini = (n, pri) ->
+  print "[#{ n }]\r\nEnabled=1\r\nPriority=#{ pri }\r\n"
+
+ini "mod0000_MergedFiles", 0
+
+for _, v in ipairs tree.root.installed.mod
+  unless v._attr.enabled
+    continue
+
+  pri = v._attr.priority
+  if pri == "-"
+    pri = 100 -- handle mods w/no explicit pri
+
+  n = v.data
+  unless type(n) == "table"
+    n = { n } -- handle multi-part mods
+
+  ini vv, pri for _, vv in ipairs n
+
