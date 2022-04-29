@@ -19,40 +19,7 @@ influx_addr = os.getenv "INFLUXDB_ADDR"
 influx_user = os.getenv "INFLUXDB_USER"
 influx_pwd = os.getenv "INFLUXDB_PASSWORD"
 -- create this beforehand, eg `create database blahblah` via influxdb cli
-influx_db = "your-choice"
-
--- not sure this is always necessary, _but_:
---   - the router detects multiple logins
---   - it seems to 'start' a new session by you hitting `/`
---   - if you browse to that, it'll say "do you want to log the other one out?"
---
--- in other words, it's weird, and this is how i keep the "session active"
-with request.new_from_uri "http://#{ router_ip }/"
-  .headers\upsert ":method", "GET"
-  .headers\append "User-Agent", "r7000p-export"
-  .headers\append "Authorization", "Basic #{ router_auth }"
-  \go 10
-
-req = with request.new_from_uri "http://#{ router_ip }/RST_stattbl.htm"
-  .headers\upsert ":method", "GET"
-  .headers\append "User-Agent", "r7000p-export"
-  .headers\append "Authorization", "Basic #{ router_auth }"
-  .headers\append "Referer", "http://#{ router_ip }/RST_interval.htm"
-
-rhead, rstream = req\go 10 -- timeout
-unless rhead
-  error "no headers from request: #{ rstream }"
-
-for k, v in rhead\each!
-  print "header #{ k }: #{ v }"
-
-b, err = rstream\get_body_as_string!
-unless b
-  error "no body!"
-if err
-  error "error: #{ err }"
-
-doc = xmlua.HTML.parse b
+influx_db = os.getenv "INFLUXDB_DB"
 
 type_map =
   * "Port"
@@ -64,6 +31,57 @@ type_map =
   * "RxBs"
   * "Uptime"
 
+meter_map =
+  * false -- "Period", don't want this
+  * false -- "ConnectionTime", don't want this
+  * "Upload"
+  * "Download"
+  * "Total"
+
+fetch = (page) ->
+  req = with request.new_from_uri "http://#{ router_ip }/#{ page }"
+    .headers\upsert ":method", "GET"
+    .headers\append "User-Agent", "r7000p-export"
+    .headers\append "Authorization", "Basic #{ router_auth }"
+    .headers\append "Referer", "http://#{ router_ip }/#{ page }"
+
+  rhead, rstream = req\go 10 -- timeout
+  unless rhead
+    error "no headers from request(#{ page }): #{ rstream }"
+
+  b, err = rstream\get_body_as_string!
+  unless b
+    error "no body!"
+  if err
+    error "#{ b }, error: #{ err }"
+
+  b
+
+write_influx = (point) ->
+  req = with request.new_from_uri "http://#{ influx_addr }/write?db=#{ influx_db }"
+    .headers\upsert ":method", "POST"
+    .headers\append "User-Agent", "r7000p-export"
+    .headers\append "Authorization", "Token: #{ influx_user }:#{ influx_pwd }"
+
+  req\set_body point
+
+  print "#{ os.time! } write #{ point }"
+  rhead, _ = req\go 30
+  rhead != nil
+
+-- not sure this is always necessary, _but_:
+--   - the router detects multiple logins
+--   - it seems to 'start' a new session by you hitting `/`
+--   - if you browse to that, it'll say "do you want to log the other one out?"
+--
+-- in other words, it's weird, and this is how i keep the "session active"
+fetch ""
+
+print "#{ os.time! } fetch RST stats"
+body = fetch "RST_stattbl.htm"
+doc = xmlua.HTML.parse body
+
+-- get iface stats
 per_iface = {}
 for i, v in ipairs doc\search "/html/body/table/tr/td/table/tr"
   unless i > 1
@@ -74,7 +92,8 @@ for i, v in ipairs doc\search "/html/body/table/tr/td/table/tr"
     unless vv
       continue
 
-    if ii == 1
+    typ = type_map[ii]
+    if typ == type_map[1]
       iface = vv\content!
       switch iface
         when "5G WLAN a/n/ac"
@@ -83,31 +102,30 @@ for i, v in ipairs doc\search "/html/body/table/tr/td/table/tr"
           iface = "2gWLAN"
         else
           iface = iface
-      per_iface[iface] = { "#{ type_map[1] }": iface }
+      per_iface[iface] = {}
 
-    per_iface[iface]["#{ type_map[ii] }"] = vv\content!
+    per_iface[iface]["#{ typ }"] = vv\content!
 
--- as influx strings
--- note that it'd probably just be easier to do this above,
--- but i was exploring the data and testing as i wrote it
--- #dealwithit
 for k, v in pairs per_iface
   if v.Status == "Link Down"
     continue
 
-  print inspect v
   for kk, vv in pairs v
     if kk == "Uptime" or kk == "Port"
       continue
 
-    req = with request.new_from_uri "http://#{ influx_addr }/write?db=#{ influx_db }"
-      .headers\upsert ":method", "POST"
-      .headers\append "User-Agent", "r7000p-export"
-      .headers\append "Authorization", "Token: #{ influx_user }:#{ influx_pwd }"
+    write_influx "#{ kk },iface=#{ k } value=#{ vv }"
 
-    pt = "#{ kk },iface=#{ k } value=#{ vv }"
-    print pt
-    req\set_body pt
+-- fetch today's stats; don't care about previous dates!
+print "#{ os.time! } fetch traffic"
+body = fetch "traffic_meter.htm"
+doc = xmlua.HTML.parse body
 
-    rhead, rstream = req\go 10
+for i, v in ipairs doc\root!\search "/html/body/div/form/table/tr[2]/td/div/table/tr[26]/td/table/tr[3]/*"
+  k = meter_map[i]
+  unless k
+    continue
+
+  c = (v\content!)\gsub "^%s*(.-)%s*$", "%1"
+  write_influx "traffic,type=#{ k } value=#{ c }"
 
