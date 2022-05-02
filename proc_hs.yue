@@ -1,0 +1,43 @@
+#!/usr/bin/env -S yue -e
+-- dedup zsh_history
+
+fp, err = io.open "#{ os.getenv "HOME" }/.zsh_history"
+if err != nil
+  error "couldn't open zsh hist: #{ err }"
+
+dedup = {}
+stack = {}
+for ln in fp\lines!
+  is_complete = (string.sub ln, #ln) != "\\"
+
+  unless is_complete
+    stack[] = ln
+    continue
+
+  if #stack > 0
+    -- turn whole stack into line
+    stack[] = ln
+    ln = table.concat stack, "\n"
+    stack = {}
+
+  r = ln\gmatch ": (%d+):(%d+);(.+)"
+  d, t, c = r!
+
+  if c == nil -- skip empty lines
+    continue
+
+  dedup[c] =
+    * math.min d, dedup[c]?[1] ?? d
+    * math.min t, dedup[c]?[2] ?? t
+
+deduped = {}
+for k, v in pairs dedup
+  deduped[] = { k, v[1], v[2] }
+dedup = nil
+
+table.sort deduped, (a, b) ->
+  a[2] < b[2]
+
+for i, v in ipairs deduped
+  print ": #{ v[2] }:#{ v[3] };#{ v[1] }"
+
