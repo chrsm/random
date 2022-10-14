@@ -1,0 +1,6 @@
+{
+    "require": {
+        "gemorroj/archive7z": "^5.4",
+        "sabre/xml": "^4.0"
+    }
+}
